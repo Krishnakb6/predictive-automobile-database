@@ -1,69 +1,162 @@
-
 import streamlit as st
 import requests
 import pandas as pd
+# import altair as alt  # Removed for dashboard
+from datetime import date
 
 # FastAPI backend URL
 BACKEND_URL = "http://127.0.0.1:8000"
 
 st.set_page_config(layout="wide")
+st.title("🌎 Global Mechanics Data Platform")
 
-st.title("Global Mechanics Data Platform")
+# --- NEW: Status Check Function ---
+@st.cache_data(ttl=10) # Cache status for 10 seconds
+def get_backend_status():
+    """Checks the backend /status/ endpoint."""
+    try:
+        response = requests.get(f"{BACKEND_URL}/status/")
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"model_status": "offline"}
+    except requests.exceptions.ConnectionError:
+        return {"model_status": "offline", "message": "Backend is offline."}
 
-# Sidebar for navigation
-tab = st.sidebar.radio("Navigate", ["Ingestion & Normalization", "Database Viewer", "Predictive Maintenance"])
+# --- UPDATED: Sidebar for navigation ---
+st.sidebar.title("Navigation")
+status = get_backend_status()
+if status and status.get("model_status") == "ready":
+    st.sidebar.success("✅ ML Model Ready")
+elif status.get("model_status") == "loading":
+    st.sidebar.warning("⏳ ML Model is loading...")
+else:
+    st.sidebar.error("❌ Backend Offline")
 
+tab = st.sidebar.radio("Go to:", ["Ingestion & Normalization", "Database Viewer", "Predictive Maintenance"])
+
+
+# --- UNCHANGED: Ingestion & Normalization Tab ---
 if tab == "Ingestion & Normalization":
     st.header("Data Ingestion & Normalization")
-
-    uploaded_files = st.file_uploader("Upload CSV Files", accept_multiple_files=True, type='csv')
-
+    st.info("Upload your CSV or Excel file. The system will automatically map any matching columns.")
+    st.subheader("Supported Column Names")
+    supported_cols = [
+        'mech_name', 'mech_phone', 'location_info', 'operating_hours', 
+        'slot_details', 'part_details', 'employee_details', 'project_info', 
+        'client_info', 'order_details'
+    ]
+    st.code(f"{', '.join(supported_cols)}")
+    uploaded_files = st.file_uploader(
+        "Upload CSV or Excel Files", 
+        accept_multiple_files=True, 
+        type=['csv', 'xlsx', 'xls']
+    )
     if uploaded_files:
         for file in uploaded_files:
-            files = {"file": (file.name, file.getvalue(), "text/csv")}
-            response = requests.post(f"{BACKEND_URL}/upload_csv/", files=files)
+            files = {"file": (file.name, file.getvalue())} 
+            try:
+                response = requests.post(f"{BACKEND_URL}/upload_csv/", files=files)
+                if response.status_code == 200:
+                    st.success(f"{response.json().get('message')}")
+                else:
+                    st.error(f"Error uploading {file.name}: {response.json().get('detail', 'Unknown error')}")
+            except requests.exceptions.ConnectionError as e:
+                 st.error(f"Could not connect to backend: {e}")
+    st.divider()
+    if st.button("Trigger BCNF Normalization", type="primary"):
+        try:
+            response = requests.post(f"{BACKEND_URL}/normalize/")
             if response.status_code == 200:
-                st.success(f"Successfully uploaded {file.name}")
+                st.success(f"BCNF Normalization triggered successfully! {response.json().get('message')}")
             else:
-                st.error(f"Error uploading {file.name}: {response.text}")
+                st.error(f"Error triggering normalization: {response.json().get('detail')}")
+        except requests.exceptions.ConnectionError as e:
+            st.error(f"Could not connect to backend: {e}")
 
-    if st.button("Trigger BCNF Normalization"):
-        response = requests.post(f"{BACKEND_URL}/normalize/")
-        if response.status_code == 200:
-            st.success("BCNF Normalization triggered successfully!")
-        else:
-            st.error(f"Error triggering normalization: {response.text}")
-
+# --- UNCHANGED: Database Viewer Tab ---
 elif tab == "Database Viewer":
     st.header("Global Database Viewer")
+
+    def clear_filters_and_page():
+        st.session_state.active_filters = {}
 
     try:
         response = requests.get(f"{BACKEND_URL}/tables/")
         if response.status_code == 200:
-            tables = response.json().get("tables", [])
-            selected_table = st.selectbox("Select a table to view", tables)
+            if "table_info" not in st.session_state:
+                st.session_state.table_info = response.json().get("tables", {})
+            
+            table_info = st.session_state.table_info
+            
+            # Filter out the new ServiceCenters table from this view
+            viewable_tables = {k: v for k, v in table_info.items() if k != 'ServiceCenters'}
+
+            selected_table = st.selectbox(
+                "Select a table to view", 
+                viewable_tables.keys(), # Use filtered list
+                on_change=clear_filters_and_page
+            )
 
             if selected_table:
-                page = st.session_state.get(f"{selected_table}_page", 1)
-
-                col1, col2 = st.columns(2)
-                if col1.button("Previous Page"):
-                    if page > 1:
-                        page -= 1
-                if col2.button("Next Page"):
-                    page += 1
+                columns = table_info.get(selected_table, [])
                 
-                st.session_state[f"{selected_table}_page"] = page
+                with st.expander("Search & Filter"):
+                    with st.form(key=f"{selected_table}_filter_form"):
+                        filter_inputs = {}
+                        form_cols = st.columns(3)
+                        
+                        for i, col_name in enumerate(columns):
+                            default_val = st.session_state.get('active_filters', {}).get(col_name, "")
+                            filter_inputs[col_name] = form_cols[i % 3].text_input(
+                                f"Filter by {col_name}", 
+                                value=default_val
+                            )
+                        
+                        submitted = st.form_submit_button("Apply Filters")
+                        
+                        if submitted:
+                            st.session_state.active_filters = {
+                                k: v for k, v in filter_inputs.items() if v.strip()
+                            }
+                            st.session_state[f"{selected_table}_page"] = 1
+                            st.rerun()
 
-                data_response = requests.get(f"{BACKEND_URL}/data/{selected_table}/?page={page}")
+                page = st.session_state.get(f"{selected_table}_page", 1)
+                active_filters = st.session_state.get('active_filters', {})
+                
+                if active_filters:
+                    st.info(f"Active Filters: `{active_filters}`")
+
+                col1, col2, col3 = st.columns([1.5, 1.5, 7]) # Adjusted col ratios
+                if col1.button("⬅️ Previous Page", use_container_width=True):
+                    if page > 1:
+                        st.session_state[f"{selected_table}_page"] = page - 1
+                        st.rerun()
+                
+                if col2.button("Next Page ➡️", use_container_width=True):
+                    st.session_state[f"{selected_table}_page"] = page + 1
+                    st.rerun()
+                
+                col3.write(f"Displaying Page: {page}")
+
+                payload = {
+                    "table_name": selected_table,
+                    "page": page,
+                    "page_size": 10,
+                    "filters": active_filters
+                }
+                
+                data_response = requests.post(f"{BACKEND_URL}/data/query/", json=payload)
+                
                 if data_response.status_code == 200:
                     data = data_response.json()
                     if data:
-                        st.dataframe(pd.DataFrame(data))
+                        st.dataframe(pd.DataFrame(data), use_container_width=True)
                     else:
-                        st.warning("No more data to display.")
+                        st.warning("No data found for the current page and filters.")
                         if page > 1:
-                            st.session_state[f"{selected_table}_page"] = page - 1 # Go back to last valid page
+                            st.session_state[f"{selected_table}_page"] = page - 1
                 else:
                     st.error(f"Error fetching data: {data_response.text}")
         else:
@@ -71,36 +164,158 @@ elif tab == "Database Viewer":
     except requests.exceptions.ConnectionError as e:
         st.error(f"Could not connect to the backend: {e}. Please ensure the backend is running.")
 
+
+# --- UPDATED: Predictive Maintenance Tab (FULL FORM) ---
 elif tab == "Predictive Maintenance":
-    st.header("Predictive Maintenance")
+    st.header("⚙️ Predictive Maintenance & Scheduling")
+    st.info("Fill in vehicle details. Leave fields blank to use the dataset's average values for prediction.")
+
+    # --- NEW: Initialize session state for prediction result ---
+    if "prediction_result" not in st.session_state:
+        st.session_state.prediction_result = None
 
     with st.form("prediction_form"):
-        st.write("Fill in the vehicle details to predict maintenance needs. Leave fields blank for imputation.")
-        vehicle_model = st.text_input("Vehicle Model")
-        mileage = st.number_input("Mileage", min_value=0, value=0)
-        maintenance_history = st.selectbox("Maintenance History", ["", "Good", "Average", "Poor"])
-        reported_issues = st.number_input("Reported Issues", min_value=0, value=0)
-        vehicle_age = st.number_input("Vehicle Age", min_value=0, value=0)
+        
+        # --- Form Layout (Unchanged) ---
+        st.subheader("Vehicle & Usage")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            Vehicle_Model = st.selectbox("Vehicle Model", ["", "Truck", "Van", "Bus", "Car", "SUV"])
+            Mileage = st.number_input("Mileage", min_value=0, value=0, step=1000)
+            Vehicle_Age = st.number_input("Vehicle Age (Years)", min_value=0, value=0, step=1)
+        with col2:
+            Fuel_Type = st.selectbox("Fuel Type", ["", "Electric", "Petrol", "Diesel"])
+            Odometer_Reading = st.number_input("Odometer Reading", min_value=0, value=0, step=1000)
+            Engine_Size = st.number_input("Engine Size (CC)", min_value=0, value=0, step=100)
+        with col3:
+            Transmission_Type = st.selectbox("Transmission Type", ["", "Automatic", "Manual"])
+            Fuel_Efficiency = st.number_input("Fuel Efficiency (e.g., 15.5)", min_value=0.0, value=0.0, step=0.1, format="%.1f")
+            Insurance_Premium = st.number_input("Insurance Premium", min_value=0, value=0, step=100)
+        st.divider()
+        st.subheader("Service & History")
+        col4, col5, col6 = st.columns(3)
+        with col4:
+            Maintenance_History = st.selectbox("Maintenance History", ["", "Poor", "Average", "Good"])
+            Reported_Issues = st.number_input("Reported Issues (Count)", min_value=0, value=0, step=1)
+            Owner_Type = st.selectbox("Owner Type", ["", "First", "Second", "Third"])
+        with col5:
+            Service_History = st.number_input("Service History (Count)", min_value=0, value=0, step=1)
+            Accident_History = st.number_input("Accident History (Count)", min_value=0, value=0, step=1)
+            Tire_Condition = st.selectbox("Tire Condition", ["", "Worn Out", "Good", "New"])
+        with col6:
+            today = date.today()
+            Last_Service_Date = st.date_input("Last Service Date", value=None, max_value=today)
+            Warranty_Expiry_Date = st.date_input("Warranty Expiry Date", value=None)
+        st.divider()
 
-        submitted = st.form_submit_button("Predict")
+        submit_col1, submit_col2 = st.columns(2)
+        predict_button = submit_col1.form_submit_button("1. Predict Maintenance Need", use_container_width=True)
+        schedule_button = submit_col2.form_submit_button("2. Predict & Generate Schedule", type="primary", use_container_width=True)
 
-        if submitted:
+        if predict_button or schedule_button:
+            st.session_state.prediction_result = None # Clear previous results
+            
             payload = {
-                "Vehicle_Model": vehicle_model if vehicle_model else None,
-                "Mileage": mileage if mileage > 0 else None,
-                "Maintenance_History": maintenance_history if maintenance_history else None,
-                "Reported_Issues": reported_issues if reported_issues > 0 else None,
-                "Vehicle_Age": vehicle_age if vehicle_age > 0 else None
+                "Vehicle_Model": Vehicle_Model if Vehicle_Model else None,
+                "Mileage": Mileage if Mileage > 0 else None,
+                "Maintenance_History": Maintenance_History if Maintenance_History else None,
+                "Reported_Issues": Reported_Issues if Reported_Issues > 0 else None,
+                "Vehicle_Age": Vehicle_Age if Vehicle_Age > 0 else None,
+                "Fuel_Type": Fuel_Type if Fuel_Type else None,
+                "Transmission_Type": Transmission_Type if Transmission_Type else None,
+                "Engine_Size": Engine_Size if Engine_Size > 0 else None,
+                "Odometer_Reading": Odometer_Reading if Odometer_Reading > 0 else None,
+                "Last_Service_Date": Last_Service_Date.isoformat() if Last_Service_Date else None,
+                "Warranty_Expiry_Date": Warranty_Expiry_Date.isoformat() if Warranty_Expiry_Date else None,
+                "Owner_Type": Owner_Type if Owner_Type else None,
+                "Insurance_Premium": Insurance_Premium if Insurance_Premium > 0 else None,
+                "Service_History": Service_History if Service_History > 0 else None,
+                "Accident_History": Accident_History if Accident_History > 0 else None,
+                "Fuel_Efficiency": Fuel_Efficiency if Fuel_Efficiency > 0 else None,
+                "Tire_Condition": Tire_Condition if Tire_Condition else None
             }
 
-            response = requests.post(f"{BACKEND_URL}/predict/", json=payload)
+            endpoint_url = ""
+            if predict_button:
+                endpoint_url = f"{BACKEND_URL}/predict/"
+            elif schedule_button:
+                endpoint_url = f"{BACKEND_URL}/predict_schedule/"
 
-            if response.status_code == 200:
-                result = response.json()
-                prediction = result.get("prediction")
-                probability = result.get("probability")
+            try:
+                response = requests.post(endpoint_url, json=payload)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    # --- NEW: Store result in session state ---
+                    st.session_state.prediction_result = result 
+                    
+                else:
+                    # Clear result on error
+                    st.session_state.prediction_result = None
+                    try:
+                        detail = response.json().get('detail', 'Unknown API error')
+                        st.error(f"Error from API: {detail}")
+                    except requests.exceptions.JSONDecodeError:
+                        st.error(f"Server returned a non-JSON error (Status {response.status_code}):")
+                        st.code(response.text)
 
-                st.success(f"Maintenance Required: {'Yes' if prediction == 1 else 'No'}")
-                st.info(f"Confidence: {probability:.2f}")
-            else:
-                st.error(f"Error making prediction: {response.text}")
+            except requests.exceptions.ConnectionError as e:
+                st.error(f"Could not connect to backend: {e}")
+
+    # --- NEW: Display Results & Booking Form (outside the form) ---
+    if st.session_state.prediction_result:
+        result = st.session_state.prediction_result
+        prediction = result.get("prediction")
+        probability = result.get("probability", 0)
+        
+        st.divider()
+        st.subheader("Prediction Result")
+        
+        if prediction == 1:
+            st.error(f"**Maintenance Required** (Confidence: {probability:.2%})")
+            
+            # Show schedule message if it exists
+            if result.get("schedule_message"):
+                st.subheader("Service Schedule Suggestion")
+                message = result.get("schedule_message")
+                suggested_date = result.get("suggested_service_date")
+                
+                if suggested_date:
+                    st.info(f"{message} \n\nSuggested Service Date: **{suggested_date}**")
+                else:
+                    st.info(message)
+            
+            # --- NEW: Service Booking Section ---
+            st.subheader("Book Your Service")
+            st.write("Find a service center in your area.")
+            
+            location_query = st.text_input("Enter your location (e.g., city or state)")
+            
+            if st.button("Search Centers", type="primary"):
+                if location_query:
+                    try:
+                        params = {"location": location_query}
+                        search_response = requests.get(f"{BACKEND_URL}/search_centers/", params=params)
+                        if search_response.status_code == 200:
+                            centers = search_response.json()
+                            if centers:
+                                st.success(f"Found {len(centers)} service centers matching '{location_query}':")
+                                for center in centers:
+                                    st.markdown(f"""
+                                    **{center['name']}**
+                                    - **Phone:** {center['phone']}
+                                    - **Location:** {center['location']}
+                                    - **Hours:** {center['hours']}
+                                    """)
+                            else:
+                                st.warning(f"No service centers found matching '{location_query}'.")
+                        else:
+                            st.error(f"Error searching centers: {search_response.text}")
+                    except requests.exceptions.ConnectionError as e:
+                        st.error(f"Could not connect to backend: {e}")
+                else:
+                    st.warning("Please enter a location to search.")
+
+        else:
+            st.success(f"**Maintenance Not Required** (Confidence: {probability:.2%})")
+

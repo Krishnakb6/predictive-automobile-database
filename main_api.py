@@ -1,27 +1,28 @@
-
 import json
+import os
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import pandas as pd
-from sqlalchemy import create_engine, Column, Integer, String, MetaData, Table, inspect
+from sqlalchemy import create_engine, Column, Integer, String, MetaData, Table, inspect, text, Float
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import text
-import joblib
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.linear_model import LogisticRegression
-import numpy as np
+import io
+from datetime import date
 
-# Database setup
+# Import all ML logic
+import ml_model 
+# Import service center logic
+import service_center_logic
+
+# --- Database Setup ---
 DATABASE_URL = "sqlite:///./mechanics_db.sqlite"
-engine = create_engine(DATABASE_URL)
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 metadata = MetaData()
+
+# --- Table Definitions ---
 
 # Staging Table
 Ingestion_Stage = Table('Ingestion_Stage', metadata,
@@ -36,6 +37,12 @@ Ingestion_Stage = Table('Ingestion_Stage', metadata,
     Column('client_info', String),
     Column('order_details', String)
 )
+
+SUPPORTED_STAGING_COLUMNS = [
+    'mech_name', 'mech_phone', 'location_info', 'operating_hours', 
+    'slot_details', 'part_details', 'employee_details', 'project_info', 
+    'client_info', 'order_details'
+]
 
 # BCNF Tables
 class Mechanics(Base):
@@ -54,7 +61,7 @@ class Locations(Base):
 class Parts(Base):
     __tablename__ = 'Parts'
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String)
+    name = Column(String, unique=True)
 
 class Slots(Base):
     __tablename__ = 'Slots'
@@ -62,7 +69,7 @@ class Slots(Base):
     mechanic_id = Column(Integer)
     time_slot = Column(String)
 
-# Predictive Data Table
+# Predictive Data Table (matches Kaggle)
 class Predictive_Data(Base):
     __tablename__ = 'Predictive_Data'
     id = Column(Integer, primary_key=True, index=True)
@@ -71,140 +78,291 @@ class Predictive_Data(Base):
     Maintenance_History = Column(String)
     Reported_Issues = Column(Integer)
     Vehicle_Age = Column(Integer)
+    Fuel_Type = Column(String)
+    Transmission_Type = Column(String)
+    Engine_Size = Column(Integer)
+    Odometer_Reading = Column(Integer)
+    Last_Service_Date = Column(String)
+    Warranty_Expiry_Date = Column(String)
+    Owner_Type = Column(String)
+    Insurance_Premium = Column(Integer)
+    Service_History = Column(Integer)
+    Accident_History = Column(Integer)
+    Fuel_Efficiency = Column(Float)
+    Tire_Condition = Column(String)
+    Brake_Condition = Column(String)
+    Battery_Status = Column(String)
     Need_Maintenance = Column(Integer)
 
+# --- Create tables ---
 metadata.create_all(bind=engine)
-Base.metadata.create_all(bind=engine)
+# Note: The service_center_logic.py file no longer creates tables.
+# This Base.metadata.create_all(bind=engine) is sufficient.
 
-app = FastAPI()
+app = FastAPI(title="Global Mechanics API")
 
-# ML Model Training
-def train_and_save_model():
-    # Dummy data for training
-    data = {
-        'Vehicle_Model': ['A', 'B', 'A', 'C', 'B', 'A', 'C'],
-        'Mileage': [10000, 20000, 15000, 30000, 25000, 12000, 28000],
-        'Maintenance_History': ['Good', 'Average', 'Good', 'Poor', 'Average', 'Good', 'Poor'],
-        'Reported_Issues': [1, 3, 2, 5, 4, 1, 6],
-        'Vehicle_Age': [2, 4, 3, 6, 5, 2, 7],
-        'Need_Maintenance': [0, 1, 0, 1, 1, 0, 1]
-    }
-    df = pd.DataFrame(data)
-    df.to_sql('Predictive_Data', engine, if_exists='replace', index=False)
+# --- Global ML Artifacts ---
+model = None
+imputation_values = None
 
-    X = df.drop('Need_Maintenance', axis=1)
-    y = df['Need_Maintenance']
+# --- Startup Event ---
+@app.on_event("startup")
+def load_model_on_startup():
+    global model, imputation_values
+    try:
+        # 1. Load ML Model
+        model, imputation_values = ml_model.load_model_artifacts()
+        print("ML model and imputation values loaded successfully.")
+        
+        # 2. Load Predictive Data into DB (if needed)
+        data_file = "vehicle_maintenance_data.csv"
+        inspector = inspect(engine)
+        table_names = inspector.get_table_names()
+        
+        load_data = False
+        if 'Predictive_Data' not in table_names:
+            load_data = True
+        else:
+            with engine.connect() as conn:
+                count = conn.execute(text("SELECT COUNT(*) FROM Predictive_Data")).scalar()
+                if count == 0:
+                    load_data = True
 
-    numerical_features = ['Mileage', 'Reported_Issues', 'Vehicle_Age']
-    categorical_features = ['Vehicle_Model', 'Maintenance_History']
+        if load_data:
+            if os.path.exists(data_file):
+                pd.read_csv(data_file).to_sql('Predictive_Data', engine, if_exists='replace', index=False)
+                print("Loaded CSV data into Predictive_Data table for viewing.")
+            else:
+                print(f"Warning: {data_file} not found. Predictive_Data table will be empty.")
+        else:
+            print("Predictive_Data table already exists and is populated.")
 
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', StandardScaler(), numerical_features),
-            ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
-        ])
+        # 3. Load Service Center Data - This is no longer needed
+        print("Service center logic is now dynamic and uses normalized data.")
 
-    pipeline = Pipeline(steps=[('preprocessor', preprocessor),
-                               ('classifier', LogisticRegression())])
+    except FileNotFoundError as e:
+        print(f"STARTUP FAILED: {e}")
+        print("Please ensure 'vehicle_maintenance_data.csv' is present.")
+        raise
+    except Exception as e:
+        print(f"Error during model loading: {e}")
+        raise
 
-    pipeline.fit(X, y)
-    joblib.dump(pipeline, 'maintenance_model.joblib')
-
-    imputation_values = {
-        'numerical': {col: X[col].mean() for col in numerical_features},
-        'categorical': {col: X[col].mode()[0] for col in categorical_features}
-    }
-    joblib.dump(imputation_values, 'imputation_values.joblib')
-
-train_and_save_model()
-
-model = joblib.load('maintenance_model.joblib')
-imputation_values = joblib.load('imputation_values.joblib')
-
+# --- Pydantic Models ---
 class PredictionInput(BaseModel):
     Vehicle_Model: str | None = None
     Mileage: int | None = None
     Maintenance_History: str | None = None
     Reported_Issues: int | None = None
     Vehicle_Age: int | None = None
+    Fuel_Type: str | None = None
+    Transmission_Type: str | None = None
+    Engine_Size: int | None = None
+    Odometer_Reading: int | None = None
+    Last_Service_Date: str | None = None
+    Warranty_Expiry_Date: str | None = None
+    Owner_Type: str | None = None
+    Insurance_Premium: int | None = None
+    Service_History: int | None = None
+    Accident_History: int | None = None
+    Fuel_Efficiency: float | None = None
+    Tire_Condition: str | None = None
+
+class TableQuery(BaseModel):
+    table_name: str
+    page: int = 1
+    page_size: int = 10
+    filters: dict[str, str] | None = None
+
+
+# --- API Endpoints ---
+
+@app.get("/status/")
+def get_status():
+    """
+    Checks if the ML model is loaded and ready.
+    """
+    if model and imputation_values:
+        return {"model_status": "ready", "message": "Ready"}
+    else:
+        return {"model_status": "loading", "message": "Model is loading..."}
 
 @app.post("/upload_csv/")
 async def upload_csv(file: UploadFile = File(...)):
     try:
-        df = pd.read_csv(file.file)
-        df.to_sql('Ingestion_Stage', engine, if_exists='append', index=False)
-        return {"message": "CSV uploaded successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        contents = await file.read() 
+        file_bytes = io.BytesIO(contents)
+        
+        df_raw = None
+        if file.filename.endswith('.csv'):
+            df_raw = pd.read_csv(file_bytes)
+        elif file.filename.endswith(('.xlsx', '.xls')):
+            df_raw = pd.read_excel(file_bytes)
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail="Unsupported file type. Please upload a CSV or Excel file (.xls, .xlsx)."
+            )
+        
+        df_standardized = pd.DataFrame(columns=SUPPORTED_STAGING_COLUMNS)
+        common_columns = [col for col in df_raw.columns if col in SUPPORTED_STAGING_COLUMNS]
 
-@app.get("/data/{table_name}/")
-def get_table_data(table_name: str, page: int = 1, page_size: int = 10):
+        if not common_columns:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": f"File '{file.filename}' contained no data with supported column names."}
+            )
+
+        df_standardized[common_columns] = df_raw[common_columns]
+        df_standardized.to_sql('Ingestion_Stage', engine, if_exists='append', index=False)
+        
+        return {
+            "message": f"File '{file.filename}' uploaded. Found and mapped {len(common_columns)} supported columns."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+
+
+@app.post("/data/query/")
+def get_table_data_with_filters(query: TableQuery):
+    inspector = inspect(engine)
+    if query.table_name not in inspector.get_table_names():
+        raise HTTPException(status_code=404, detail=f"Table '{query.table_name}' not found.")
+    valid_columns = {col['name'] for col in inspector.get_columns(query.table_name)}
+
     try:
-        conn = engine.connect()
-        query = f"SELECT * FROM {table_name} LIMIT {page_size} OFFSET {(page - 1) * page_size}"
-        df = pd.read_sql(query, conn)
-        conn.close()
+        with engine.connect() as conn:
+            sql_query = f"SELECT * FROM {query.table_name}"
+            
+            params = {}
+            where_clauses = []
+            if query.filters:
+                for i, (col, val) in enumerate(query.filters.items()):
+                    if col in valid_columns and val:
+                        param_name = f"val_{i}"
+                        where_clauses.append(f"{col} LIKE :{param_name}")
+                        params[param_name] = f"%{val}%" # LIKE '%%'
+            
+            if where_clauses:
+                sql_query += " WHERE " + " AND ".join(where_clauses)
+
+            sql_query += f" LIMIT {query.page_size} OFFSET {(query.page - 1) * query.page_size}"
+            
+            df = pd.read_sql(text(sql_query), conn, params=params)
+            
         return json.loads(df.to_json(orient='records'))
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Table not found or error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error querying table: {str(e)}")
+
 
 @app.post("/normalize/")
 def normalize_data():
     try:
-        conn = engine.connect()
-        # Clear BCNF tables
-        conn.execute(text("DELETE FROM Mechanics"))
-        conn.execute(text("DELETE FROM Locations"))
-        conn.execute(text("DELETE FROM Parts"))
-        conn.execute(text("DELETE FROM Slots"))
-        
-        df = pd.read_sql("SELECT * FROM Ingestion_Stage", conn)
+        with engine.connect() as conn:
+            with conn.begin():
+                conn.execute(text("DELETE FROM Mechanics"))
+                conn.execute(text("DELETE FROM Locations"))
+                conn.execute(text("DELETE FROM Parts"))
+                conn.execute(text("DELETE FROM Slots"))
+                
+                df_stage = pd.read_sql("SELECT * FROM Ingestion_Stage", conn)
+                if df_stage.empty:
+                    return {"message": "Staging table is empty. Nothing to normalize."}
 
-        # Normalize data (this is a simplified example)
-        locations = df[['location_info', 'operating_hours']].drop_duplicates().reset_index(drop=True)
-        locations['id'] = locations.index + 1
-        locations.rename(columns={'location_info': 'address'}, inplace=True)
-        locations.to_sql('Locations', engine, if_exists='append', index=False)
+                df_locations = df_stage[['location_info', 'operating_hours']].dropna(subset=['location_info']).drop_duplicates().reset_index(drop=True)
+                df_locations['id'] = df_locations.index + 1
+                df_locations.rename(columns={'location_info': 'address'}, inplace=True)
+                df_locations.to_sql('Locations', conn, if_exists='append', index=False)
+                location_map = {row['address']: row['id'] for index, row in df_locations.iterrows()}
 
-        location_map = {row['address']: row['id'] for index, row in locations.iterrows()}
+                df_mechanics = df_stage[['mech_name', 'mech_phone', 'location_info']].dropna(subset=['mech_name']).drop_duplicates().reset_index(drop=True)
+                df_mechanics['id'] = df_mechanics.index + 1
+                df_mechanics['location_id'] = df_mechanics['location_info'].map(location_map)
+                df_mechanics.rename(columns={'mech_name': 'name', 'mech_phone': 'phone_number'}, inplace=True)
+                df_mechanics[['id', 'name', 'phone_number', 'location_id']].to_sql('Mechanics', conn, if_exists='append', index=False)
+                mechanic_map = {row['name']: row['id'] for index, row in df_mechanics.iterrows()}
 
-        mechanics = df[['mech_name', 'mech_phone', 'location_info']].drop_duplicates().reset_index(drop=True)
-        mechanics['id'] = mechanics.index + 1
-        mechanics['location_id'] = mechanics['location_info'].map(location_map)
-        mechanics.rename(columns={'mech_name': 'name', 'mech_phone': 'phone_number'}, inplace=True)
-        mechanics[['id', 'name', 'phone_number', 'location_id']].to_sql('Mechanics', engine, if_exists='append', index=False)
-        
-        conn.close()
-        return {"message": "Data normalized successfully"}
+                all_parts = set()
+                df_stage['part_details'].dropna().str.split(',').apply(lambda parts: all_parts.update(p.strip() for p in parts))
+                df_parts = pd.DataFrame(list(all_parts), columns=['name'])
+                if not df_parts.empty:
+                    df_parts['id'] = df_parts.index + 1
+                    df_parts.to_sql('Parts', conn, if_exists='append', index=False)
+
+                slot_data = []
+                for _, row in df_stage.dropna(subset=['mech_name', 'slot_details']).iterrows():
+                    mechanic_id = mechanic_map.get(row['mech_name'])
+                    if mechanic_id:
+                        slots = row['slot_details'].split(',')
+                        for slot in slots:
+                            slot_data.append({'mechanic_id': mechanic_id, 'time_slot': slot.strip()})
+                
+                if slot_data:
+                    df_slots = pd.DataFrame(slot_data).drop_duplicates()
+                    df_slots['id'] = range(1, len(df_slots) + 1)
+                    df_slots.to_sql('Slots', conn, if_exists='append', index=False)
+
+            conn.execute(text("DELETE FROM Ingestion_Stage"))
+        return {"message": "Data normalized successfully and staging table cleared."}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Normalization failed: {str(e)}")
 
 
 @app.post("/predict/")
 def predict(input_data: PredictionInput):
+    """
+    Delegates prediction logic to the ml_model service.
+    """
+    if not model or not imputation_values:
+        raise HTTPException(status_code=503, detail="Model is not ready. Please try again later.")
+        
     try:
-        data = input_data.dict()
-        
-        # Impute missing values
-        for col, value in imputation_values['numerical'].items():
-            if data[col] is None:
-                data[col] = value
-        for col, value in imputation_values['categorical'].items():
-            if data[col] is None:
-                data[col] = value
-
-        df = pd.DataFrame([data])
-        prediction = model.predict(df)
-        probability = model.predict_proba(df)
-        
-        return {
-            "prediction": int(prediction[0]),
-            "probability": float(probability[0][prediction[0]])
-        }
+        prediction_result = ml_model.get_prediction(
+            input_data=input_data.dict(),
+            model=model,
+            imputation_values=imputation_values
+        )
+        return prediction_result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+
+
+@app.post("/predict_schedule/")
+def predict_schedule(input_data: PredictionInput):
+    """
+    Delegates scheduling logic to the ml_model service.
+    """
+    if not model or not imputation_values:
+        raise HTTPException(status_code=503, detail="Model is not ready. Please try again later.")
+        
+    try:
+        schedule_result = ml_model.get_schedule_prediction(
+            input_data=input_data.dict(),
+            model=model,
+            imputation_values=imputation_values
+        )
+        return schedule_result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+
 
 @app.get("/tables/")
 def get_tables():
     inspector = inspect(engine)
-    return {"tables": inspector.get_table_names()}
+    tables = {}
+    for table_name in inspector.get_table_names():
+        tables[table_name] = [col['name'] for col in inspector.get_columns(table_name)]
+    return {"tables": tables}
+
+@app.get("/search_centers/")
+def search_centers(location: str = Query(..., min_length=1)):
+    """
+    Searches for service centers by location.
+    """
+    if not location:
+        raise HTTPException(status_code=400, detail="Location query parameter is required.")
+    
+    # This function now correctly queries the dynamic tables
+    results = service_center_logic.search_service_centers(engine, location)
+    return results
+
