@@ -1,5 +1,7 @@
 import json
 import os
+import uuid  # Added for generating booking IDs
+from datetime import datetime  # Added for booking timestamp
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -24,7 +26,7 @@ metadata = MetaData()
 
 # --- Table Definitions ---
 
-# Staging Table
+# Staging Table (uses metadata)
 Ingestion_Stage = Table('Ingestion_Stage', metadata,
     Column('mech_name', String),
     Column('mech_phone', String),
@@ -44,7 +46,7 @@ SUPPORTED_STAGING_COLUMNS = [
     'client_info', 'order_details'
 ]
 
-# BCNF Tables
+# BCNF Tables (uses Base)
 class Mechanics(Base):
     __tablename__ = 'Mechanics'
     id = Column(Integer, primary_key=True, index=True)
@@ -69,7 +71,7 @@ class Slots(Base):
     mechanic_id = Column(Integer)
     time_slot = Column(String)
 
-# Predictive Data Table (matches Kaggle)
+# Predictive Data Table (uses Base)
 class Predictive_Data(Base):
     __tablename__ = 'Predictive_Data'
     id = Column(Integer, primary_key=True, index=True)
@@ -94,10 +96,18 @@ class Predictive_Data(Base):
     Battery_Status = Column(String)
     Need_Maintenance = Column(Integer)
 
+# --- NEW: Bookings Table (uses Base) ---
+class Bookings(Base):
+    __tablename__ = 'Bookings'
+    id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(String, unique=True, index=True)
+    service_center_name = Column(String)
+    booking_time = Column(String)
+
 # --- Create tables ---
-metadata.create_all(bind=engine)
-# Note: The service_center_logic.py file no longer creates tables.
-# This Base.metadata.create_all(bind=engine) is sufficient.
+metadata.create_all(bind=engine) 
+# This now creates all class-based tables (Mechanics, Locations, Predictive_Data, AND Bookings)
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Global Mechanics API")
 
@@ -105,7 +115,7 @@ app = FastAPI(title="Global Mechanics API")
 model = None
 imputation_values = None
 
-# --- Startup Event ---
+# --- Startup Event (Unchanged) ---
 @app.on_event("startup")
 def load_model_on_startup():
     global model, imputation_values
@@ -137,7 +147,7 @@ def load_model_on_startup():
         else:
             print("Predictive_Data table already exists and is populated.")
 
-        # 3. Load Service Center Data - This is no longer needed
+        # 3. Service Center Logic
         print("Service center logic is now dynamic and uses normalized data.")
 
     except FileNotFoundError as e:
@@ -174,6 +184,9 @@ class TableQuery(BaseModel):
     page_size: int = 10
     filters: dict[str, str] | None = None
 
+# --- NEW: Pydantic Model for Booking Request ---
+class BookingRequest(BaseModel):
+    service_center_name: str
 
 # --- API Endpoints ---
 
@@ -189,6 +202,7 @@ def get_status():
 
 @app.post("/upload_csv/")
 async def upload_csv(file: UploadFile = File(...)):
+    # (Unchanged)
     try:
         contents = await file.read() 
         file_bytes = io.BytesIO(contents)
@@ -225,6 +239,7 @@ async def upload_csv(file: UploadFile = File(...)):
 
 @app.post("/data/query/")
 def get_table_data_with_filters(query: TableQuery):
+    # (Unchanged)
     inspector = inspect(engine)
     if query.table_name not in inspector.get_table_names():
         raise HTTPException(status_code=404, detail=f"Table '{query.table_name}' not found.")
@@ -257,6 +272,7 @@ def get_table_data_with_filters(query: TableQuery):
 
 @app.post("/normalize/")
 def normalize_data():
+    # (Unchanged)
     try:
         with engine.connect() as conn:
             with conn.begin():
@@ -310,17 +326,12 @@ def normalize_data():
 
 @app.post("/predict/")
 def predict(input_data: PredictionInput):
-    """
-    Delegates prediction logic to the ml_model service.
-    """
+    # (Unchanged)
     if not model or not imputation_values:
         raise HTTPException(status_code=503, detail="Model is not ready. Please try again later.")
-        
     try:
         prediction_result = ml_model.get_prediction(
-            input_data=input_data.dict(),
-            model=model,
-            imputation_values=imputation_values
+            input_data=input_data.dict(), model=model, imputation_values=imputation_values
         )
         return prediction_result
     except Exception as e:
@@ -329,17 +340,12 @@ def predict(input_data: PredictionInput):
 
 @app.post("/predict_schedule/")
 def predict_schedule(input_data: PredictionInput):
-    """
-    Delegates scheduling logic to the ml_model service.
-    """
+    # (Unchanged)
     if not model or not imputation_values:
         raise HTTPException(status_code=503, detail="Model is not ready. Please try again later.")
-        
     try:
         schedule_result = ml_model.get_schedule_prediction(
-            input_data=input_data.dict(),
-            model=model,
-            imputation_values=imputation_values
+            input_data=input_data.dict(), model=model, imputation_values=imputation_values
         )
         return schedule_result
     except Exception as e:
@@ -348,21 +354,52 @@ def predict_schedule(input_data: PredictionInput):
 
 @app.get("/tables/")
 def get_tables():
+    # (Unchanged)
     inspector = inspect(engine)
     tables = {}
     for table_name in inspector.get_table_names():
         tables[table_name] = [col['name'] for col in inspector.get_columns(table_name)]
     return {"tables": tables}
 
+
 @app.get("/search_centers/")
 def search_centers(location: str = Query(..., min_length=1)):
-    """
-    Searches for service centers by location.
-    """
+    # (Unchanged)
     if not location:
         raise HTTPException(status_code=400, detail="Location query parameter is required.")
-    
-    # This function now correctly queries the dynamic tables
     results = service_center_logic.search_service_centers(engine, location)
     return results
 
+# --- NEW: Endpoint to handle the booking ---
+@app.post("/book_service/")
+def book_service(booking_request: BookingRequest):
+    """
+    Creates a new booking record in the database.
+    """
+    db = SessionLocal()
+    try:
+        # Generate a unique booking ID
+        booking_id = f"BK-{str(uuid.uuid4())[:8].upper()}"
+        timestamp = datetime.now().isoformat()
+        
+        new_booking = Bookings(
+            booking_id=booking_id,
+            service_center_name=booking_request.service_center_name,
+            booking_time=timestamp
+        )
+        
+        db.add(new_booking)
+        db.commit()
+        db.refresh(new_booking)
+        
+        return {
+            "message": "Booking confirmed!",
+            "booking_id": new_booking.booking_id,
+            "service_center_name": new_booking.service_center_name,
+            "booking_time": new_booking.booking_time
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Booking failed: {str(e)}")
+    finally:
+        db.close()

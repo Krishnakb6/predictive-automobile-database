@@ -10,7 +10,7 @@ BACKEND_URL = "http://127.0.0.1:8000"
 st.set_page_config(layout="wide")
 st.title("🌎 Global Mechanics Data Platform")
 
-# --- NEW: Status Check Function ---
+# --- Status Check Function (Unchanged) ---
 @st.cache_data(ttl=10) # Cache status for 10 seconds
 def get_backend_status():
     """Checks the backend /status/ endpoint."""
@@ -23,7 +23,7 @@ def get_backend_status():
     except requests.exceptions.ConnectionError:
         return {"model_status": "offline", "message": "Backend is offline."}
 
-# --- UPDATED: Sidebar for navigation ---
+# --- Sidebar for navigation (Unchanged) ---
 st.sidebar.title("Navigation")
 status = get_backend_status()
 if status and status.get("model_status") == "ready":
@@ -36,7 +36,7 @@ else:
 tab = st.sidebar.radio("Go to:", ["Ingestion & Normalization", "Database Viewer", "Predictive Maintenance"])
 
 
-# --- UNCHANGED: Ingestion & Normalization Tab ---
+# --- Ingestion & Normalization Tab (Unchanged) ---
 if tab == "Ingestion & Normalization":
     st.header("Data Ingestion & Normalization")
     st.info("Upload your CSV or Excel file. The system will automatically map any matching columns.")
@@ -74,7 +74,7 @@ if tab == "Ingestion & Normalization":
         except requests.exceptions.ConnectionError as e:
             st.error(f"Could not connect to backend: {e}")
 
-# --- UNCHANGED: Database Viewer Tab ---
+# --- Database Viewer Tab (Unchanged) ---
 elif tab == "Database Viewer":
     st.header("Global Database Viewer")
 
@@ -165,14 +165,15 @@ elif tab == "Database Viewer":
         st.error(f"Could not connect to the backend: {e}. Please ensure the backend is running.")
 
 
-# --- UPDATED: Predictive Maintenance Tab (FULL FORM) ---
+# --- Predictive Maintenance Tab (UPDATED) ---
 elif tab == "Predictive Maintenance":
     st.header("⚙️ Predictive Maintenance & Scheduling")
     st.info("Fill in vehicle details. Leave fields blank to use the dataset's average values for prediction.")
 
-    # --- NEW: Initialize session state for prediction result ---
     if "prediction_result" not in st.session_state:
         st.session_state.prediction_result = None
+    if "search_results" not in st.session_state:
+        st.session_state.search_results = []
 
     with st.form("prediction_form"):
         
@@ -214,6 +215,7 @@ elif tab == "Predictive Maintenance":
 
         if predict_button or schedule_button:
             st.session_state.prediction_result = None # Clear previous results
+            st.session_state.search_results = [] # Clear old search results
             
             payload = {
                 "Vehicle_Model": Vehicle_Model if Vehicle_Model else None,
@@ -246,11 +248,8 @@ elif tab == "Predictive Maintenance":
                 
                 if response.status_code == 200:
                     result = response.json()
-                    # --- NEW: Store result in session state ---
                     st.session_state.prediction_result = result 
-                    
                 else:
-                    # Clear result on error
                     st.session_state.prediction_result = None
                     try:
                         detail = response.json().get('detail', 'Unknown API error')
@@ -258,11 +257,10 @@ elif tab == "Predictive Maintenance":
                     except requests.exceptions.JSONDecodeError:
                         st.error(f"Server returned a non-JSON error (Status {response.status_code}):")
                         st.code(response.text)
-
             except requests.exceptions.ConnectionError as e:
                 st.error(f"Could not connect to backend: {e}")
 
-    # --- NEW: Display Results & Booking Form (outside the form) ---
+    # --- Display Results & Booking Form (outside the form) ---
     if st.session_state.prediction_result:
         result = st.session_state.prediction_result
         prediction = result.get("prediction")
@@ -285,13 +283,14 @@ elif tab == "Predictive Maintenance":
                 else:
                     st.info(message)
             
-            # --- NEW: Service Booking Section ---
+            # --- Service Booking Section ---
             st.subheader("Book Your Service")
             st.write("Find a service center in your area.")
             
             location_query = st.text_input("Enter your location (e.g., city or state)")
             
             if st.button("Search Centers", type="primary"):
+                st.session_state.search_results = []
                 if location_query:
                     try:
                         params = {"location": location_query}
@@ -300,13 +299,7 @@ elif tab == "Predictive Maintenance":
                             centers = search_response.json()
                             if centers:
                                 st.success(f"Found {len(centers)} service centers matching '{location_query}':")
-                                for center in centers:
-                                    st.markdown(f"""
-                                    **{center['name']}**
-                                    - **Phone:** {center['phone']}
-                                    - **Location:** {center['location']}
-                                    - **Hours:** {center['hours']}
-                                    """)
+                                st.session_state.search_results = centers
                             else:
                                 st.warning(f"No service centers found matching '{location_query}'.")
                         else:
@@ -315,7 +308,42 @@ elif tab == "Predictive Maintenance":
                         st.error(f"Could not connect to backend: {e}")
                 else:
                     st.warning("Please enter a location to search.")
+            
+            if st.session_state.search_results:
+                centers = st.session_state.search_results
+                
+                for center in centers:
+                    col1, col2 = st.columns([3, 1]) 
+                    
+                    with col1:
+                        st.markdown(f"""
+                        **{center.get('name', 'N/A')}**
+                        - **Phone:** {center.get('phone', 'N/A')}
+                        - **Location:** {center.get('location', 'N/A')}
+                        - **Hours:** {center.get('hours', 'N/A')}
+                        """)
+                    
+                    with col2:
+                        book_key = f"book_{center.get('name', 'unknown')}_{center.get('phone', 'unknown')}"
+                        
+                        # --- THIS IS THE UPDATED LOGIC ---
+                        if st.button("Book Now", key=book_key, use_container_width=True):
+                            try:
+                                # Call the new /book_service/ endpoint
+                                booking_payload = {"service_center_name": center.get('name')}
+                                book_response = requests.post(f"{BACKEND_URL}/book_service/", json=booking_payload)
+                                
+                                if book_response.status_code == 200:
+                                    # Get the real booking ID from the response
+                                    booking_id = book_response.json().get('booking_id')
+                                    st.toast(f"Booking Confirmed! Your ID is {booking_id} 🚗💨", icon="✅")
+                                else:
+                                    st.error(f"Booking failed: {book_response.json().get('detail')}")
+                            
+                            except requests.exceptions.ConnectionError as e:
+                                st.error(f"Could not connect to backend: {e}")
+                    
+                    st.divider() 
 
         else:
             st.success(f"**Maintenance Not Required** (Confidence: {probability:.2%})")
-
