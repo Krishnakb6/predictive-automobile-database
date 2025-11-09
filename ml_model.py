@@ -6,16 +6,20 @@ from datetime import date, timedelta
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, OrdinalEncoder
 from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
+# --- CHANGE 1: Import the imblearn Pipeline ---
+from imblearn.pipeline import Pipeline 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.metrics import accuracy_score, classification_report
+# --- CHANGE 2: Import SMOTE ---
+from imblearn.over_sampling import SMOTE
 
-# --- File Paths ---
+# --- File Paths (Unchanged) ---
 MODEL_PATH = 'maintenance_model.joblib'
 IMPUTATION_PATH = 'imputation_values.joblib'
 DATA_FILE = "vehicle_maintenance_data.csv"
 
-# --- Custom Transformer from Notebook ---
+# --- Custom Transformer (Unchanged) ---
 class DateToDaysTransformer(BaseEstimator, TransformerMixin):
     """Calculates the number of days between a date column and a reference date."""
     def __init__(self, date_col, reference_date='2025-10-15'):
@@ -27,7 +31,6 @@ class DateToDaysTransformer(BaseEstimator, TransformerMixin):
 
     def transform(self, X):
         X_copy = X.copy()
-        # --- FIX 1: Added dayfirst=True to silence the date parsing warning ---
         X_copy[self.date_col] = pd.to_datetime(X_copy[self.date_col], errors='coerce', dayfirst=True)
         time_delta = self.reference_date - X_copy[self.date_col]
         
@@ -35,13 +38,10 @@ class DateToDaysTransformer(BaseEstimator, TransformerMixin):
         X_copy[new_feature_name] = time_delta.dt.days.fillna(9999) 
         return X_copy.drop(columns=[self.date_col])
 
-    # --- FIX 2: Added the required get_feature_names_out method ---
     def get_feature_names_out(self, input_features=None):
-        """Returns the new feature name created by this transformer."""
         return [self._get_new_feature_name()]
 
     def _get_new_feature_name(self):
-        """Internal helper to get the new column name."""
         if self.date_col == 'Last_Service_Date':
             return 'Days_Since_Last_Service'
         elif self.date_col == 'Warranty_Expiry_Date':
@@ -49,12 +49,8 @@ class DateToDaysTransformer(BaseEstimator, TransformerMixin):
         else:
             return 'Days_Since_' + self.date_col.replace('Date', '').strip().replace('_', '')
 
-# --- Model Training Function (Unchanged logic, but uses fixed class) ---
+# --- Model Training Function (UPDATED) ---
 def train_and_save_model():
-    """
-    Loads data, trains the full pipeline, and saves artifacts to disk.
-    Returns the loaded pipeline and imputation values.
-    """
     print("Attempting to load vehicle_maintenance_data.csv...")
     if not os.path.exists(DATA_FILE):
         print(f"FATAL ERROR: {DATA_FILE} not found.")
@@ -70,6 +66,7 @@ def train_and_save_model():
     X = df_train.drop('Need_Maintenance', axis=1)
     y = df_train['Need_Maintenance']
 
+    # --- Feature Lists (Unchanged) ---
     M_HIST_ORDER = ['Poor', 'Average', 'Good']
     OWNER_ORDER = ['Third', 'Second', 'First'] 
     TIRE_ORDER = ['Worn Out', 'Good', 'New'] 
@@ -84,6 +81,7 @@ def train_and_save_model():
     ]
     nominal_features = ['Vehicle_Model', 'Fuel_Type', 'Transmission_Type']
     
+    # --- Preprocessor (Unchanged) ---
     preprocessor = ColumnTransformer(
         transformers=[
             ('date_service', DateToDaysTransformer(date_col='Last_Service_Date'), ['Last_Service_Date']),
@@ -102,21 +100,45 @@ def train_and_save_model():
         remainder='drop' 
     )
 
+    # --- CHANGE 3: Add SMOTE to the pipeline ---
     pipeline = Pipeline(steps=[
         ('preprocessor', preprocessor),
+        # This step synthetically balances the training data
+        ('smote', SMOTE(random_state=42)), 
         ('classifier', RandomForestClassifier(
             n_estimators=100, 
             random_state=42,
-            class_weight='balanced', 
+            # class_weight is no longer needed as SMOTE handles balancing
+            # class_weight='balanced', 
             n_jobs=-1
         ))
     ])
 
-    print("Starting model training (this may take a moment)...")
-    pipeline.fit(X, y)
-    joblib.dump(pipeline, MODEL_PATH)
-    print(f"Model training complete and saved as '{MODEL_PATH}'.")
+    # --- Split data to get an accuracy score ---
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    
+    print("Starting model training with SMOTE for evaluation...")
+    # When we call fit, SMOTE is ONLY applied to X_train, y_train
+    # X_test remains unbalanced, which is what we want for a real test
+    pipeline.fit(X_train, y_train)
+    
+    # --- Evaluate the model ---
+    y_pred = pipeline.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    
+    print("\n--- Model Evaluation (on 20% test data) ---")
+    print(f"Accuracy: {accuracy:.2%}")
+    print("\nClassification Report (with SMOTE):")
+    print(classification_report(y_test, y_pred))
+    print("------------------------------------------")
 
+    # --- Retrain on 100% of data for production ---
+    print("\nRetraining model on 100% of data with SMOTE for production...")
+    pipeline.fit(X, y) # Retrain on all data
+    joblib.dump(pipeline, MODEL_PATH)
+    print(f"Production model training complete and saved as '{MODEL_PATH}'.")
+
+    # --- Imputation & Feature Importance (Unchanged) ---
     imputation_values = {
         'numerical': {col: X[col].mean() for col in numerical_features},
         'categorical': {col: X[col].mode()[0] for col in nominal_features + ordinal_features + date_features}
@@ -124,37 +146,26 @@ def train_and_save_model():
     joblib.dump(imputation_values, IMPUTATION_PATH)
     print(f"Imputation values calculated and saved as '{IMPUTATION_PATH}'.")
 
-    # --- This section will now WORK ---
     try:
-        print("\n--- Model Feature Importances ---")
-        
+        print("\n--- Model Feature Importances (Weights) ---")
         model = pipeline.named_steps['classifier']
         preprocessor = pipeline.named_steps['preprocessor']
-        
         feature_names = preprocessor.get_feature_names_out()
-        
         importances = model.feature_importances_
         importance_df = pd.DataFrame({
             'Feature': feature_names,
             'Importance': importances
         }).sort_values(by='Importance', ascending=False)
-        
         pd.set_option('display.max_rows', None)
         print(importance_df)
         pd.reset_option('display.max_rows')
-
     except Exception as e:
         print(f"Could not calculate feature importances: {e}")
-    # --- END NEW SECTION ---
 
     return pipeline, imputation_values
 
 # --- Model Loading Function (Unchanged) ---
 def load_model_artifacts():
-    """
-    Loads model artifacts from disk. If they don't exist,
-    triggers training first.
-    """
     if not os.path.exists(MODEL_PATH) or not os.path.exists(IMPUTATION_PATH):
         print("Model files not found or incomplete. Retraining model...")
         pipeline, imputation_values = train_and_save_model()
@@ -167,24 +178,16 @@ def load_model_artifacts():
 
 # --- Prediction Logic Function (Unchanged) ---
 def get_prediction(input_data: dict, model, imputation_values: dict):
-    """
-    Takes raw input data, imputes it, and returns a prediction dict.
-    """
     data = input_data.copy()
-    
-    # Impute missing values
     for col, value in imputation_values['numerical'].items():
         if data[col] is None or data[col] == 0:
             data[col] = value
     for col, value in imputation_values['categorical'].items():
         if data[col] is None or data[col] == "":
             data[col] = value
-
     df = pd.DataFrame([data])
-    
     prediction = model.predict(df)
     probability = model.predict_proba(df)
-    
     return {
         "prediction": int(prediction[0]),
         "probability": float(probability[0][prediction[0]])
@@ -192,15 +195,10 @@ def get_prediction(input_data: dict, model, imputation_values: dict):
 
 # --- Scheduling Logic Function (Unchanged) ---
 def get_schedule_prediction(input_data: dict, model, imputation_values: dict):
-    """
-    Gets a prediction and generates a schedule message.
-    """
     prediction_result = get_prediction(input_data, model, imputation_values)
     prediction = prediction_result['prediction']
-
     schedule_message = ""
     suggested_date = None
-    
     if prediction == 0:
         schedule_message = "No immediate maintenance required based on current data."
     else:
@@ -216,11 +214,8 @@ def get_schedule_prediction(input_data: dict, model, imputation_values: dict):
                 schedule_message += " Cannot suggest date as Last_Service_Date was not provided."
         except Exception as e:
             schedule_message += f" Error calculating schedule: {e}"
-
     prediction_result.update({
         "schedule_message": schedule_message,
         "suggested_service_date": suggested_date
     })
-    
     return prediction_result
-
