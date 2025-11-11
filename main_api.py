@@ -1,7 +1,7 @@
 import json
 import os
-import uuid  # Added for generating booking IDs
-from datetime import datetime  # Added for booking timestamp
+import uuid  
+from datetime import datetime  
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -12,21 +12,19 @@ from sqlalchemy.ext.declarative import declarative_base
 import io
 from datetime import date
 
-# Import all ML logic
+
 import ml_model 
-# Import service center logic
+
 import service_center_logic
 
-# --- Database Setup ---
+
 DATABASE_URL = "sqlite:///./mechanics_db.sqlite"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 metadata = MetaData()
 
-# --- Table Definitions ---
 
-# Staging Table (uses metadata)
 Ingestion_Stage = Table('Ingestion_Stage', metadata,
     Column('mech_name', String),
     Column('mech_phone', String),
@@ -46,7 +44,7 @@ SUPPORTED_STAGING_COLUMNS = [
     'client_info', 'order_details'
 ]
 
-# BCNF Tables (uses Base)
+# BCNF Tables
 class Mechanics(Base):
     __tablename__ = 'Mechanics'
     id = Column(Integer, primary_key=True, index=True)
@@ -71,7 +69,7 @@ class Slots(Base):
     mechanic_id = Column(Integer)
     time_slot = Column(String)
 
-# Predictive Data Table (uses Base)
+# Predictive Data Table
 class Predictive_Data(Base):
     __tablename__ = 'Predictive_Data'
     id = Column(Integer, primary_key=True, index=True)
@@ -96,7 +94,7 @@ class Predictive_Data(Base):
     Battery_Status = Column(String)
     Need_Maintenance = Column(Integer)
 
-# --- NEW: Bookings Table (uses Base) ---
+#new bookings table
 class Bookings(Base):
     __tablename__ = 'Bookings'
     id = Column(Integer, primary_key=True, index=True)
@@ -104,18 +102,15 @@ class Bookings(Base):
     service_center_name = Column(String)
     booking_time = Column(String)
 
-# --- Create tables ---
 metadata.create_all(bind=engine) 
-# This now creates all class-based tables (Mechanics, Locations, Predictive_Data, AND Bookings)
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Global Mechanics API")
+app = FastAPI(title="Global Mechanics API") 
 
-# --- Global ML Artifacts ---
 model = None
 imputation_values = None
 
-# --- Startup Event (Unchanged) ---
+#Startup Event
 @app.on_event("startup")
 def load_model_on_startup():
     global model, imputation_values
@@ -158,7 +153,7 @@ def load_model_on_startup():
         print(f"Error during model loading: {e}")
         raise
 
-# --- Pydantic Models ---
+#Pydantic Models 
 class PredictionInput(BaseModel):
     Vehicle_Model: str | None = None
     Mileage: int | None = None
@@ -239,7 +234,7 @@ async def upload_csv(file: UploadFile = File(...)):
 
 @app.post("/data/query/")
 def get_table_data_with_filters(query: TableQuery):
-    # (Unchanged)
+    
     inspector = inspect(engine)
     if query.table_name not in inspector.get_table_names():
         raise HTTPException(status_code=404, detail=f"Table '{query.table_name}' not found.")
@@ -256,7 +251,7 @@ def get_table_data_with_filters(query: TableQuery):
                     if col in valid_columns and val:
                         param_name = f"val_{i}"
                         where_clauses.append(f"{col} LIKE :{param_name}")
-                        params[param_name] = f"%{val}%" # LIKE '%%'
+                        params[param_name] = f"%{val}%" #like
             
             if where_clauses:
                 sql_query += " WHERE " + " AND ".join(where_clauses)
@@ -272,7 +267,6 @@ def get_table_data_with_filters(query: TableQuery):
 
 @app.post("/normalize/")
 def normalize_data():
-    # (Unchanged)
     try:
         with engine.connect() as conn:
             with conn.begin():
@@ -326,7 +320,7 @@ def normalize_data():
 
 @app.post("/predict/")
 def predict(input_data: PredictionInput):
-    # (Unchanged)
+
     if not model or not imputation_values:
         raise HTTPException(status_code=503, detail="Model is not ready. Please try again later.")
     try:
@@ -354,7 +348,7 @@ def predict_schedule(input_data: PredictionInput):
 
 @app.get("/tables/")
 def get_tables():
-    # (Unchanged)
+    
     inspector = inspect(engine)
     tables = {}
     for table_name in inspector.get_table_names():
@@ -364,13 +358,13 @@ def get_tables():
 
 @app.get("/search_centers/")
 def search_centers(location: str = Query(..., min_length=1)):
-    # (Unchanged)
+    
     if not location:
         raise HTTPException(status_code=400, detail="Location query parameter is required.")
     results = service_center_logic.search_service_centers(engine, location)
     return results
 
-# --- NEW: Endpoint to handle the booking ---
+#booking
 @app.post("/book_service/")
 def book_service(booking_request: BookingRequest):
     """
@@ -378,7 +372,7 @@ def book_service(booking_request: BookingRequest):
     """
     db = SessionLocal()
     try:
-        # Generate a unique booking ID
+        #booking id
         booking_id = f"BK-{str(uuid.uuid4())[:8].upper()}"
         timestamp = datetime.now().isoformat()
         

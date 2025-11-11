@@ -1,17 +1,16 @@
 import streamlit as st
 import requests
 import pandas as pd
-# import altair as alt  # Removed for dashboard
 from datetime import date
 
-# FastAPI backend URL
+
 BACKEND_URL = "http://127.0.0.1:8000"
 
 st.set_page_config(layout="wide")
 st.title("🌎 Global Mechanics Data Platform")
 
-# --- Status Check Function (Unchanged) ---
-@st.cache_data(ttl=10) # Cache status for 10 seconds
+
+@st.cache_data(ttl=10) 
 def get_backend_status():
     """Checks the backend /status/ endpoint."""
     try:
@@ -23,7 +22,7 @@ def get_backend_status():
     except requests.exceptions.ConnectionError:
         return {"model_status": "offline", "message": "Backend is offline."}
 
-# --- Sidebar for navigation (Unchanged) ---
+
 st.sidebar.title("Navigation")
 status = get_backend_status()
 if status and status.get("model_status") == "ready":
@@ -36,7 +35,7 @@ else:
 tab = st.sidebar.radio("Go to:", ["Ingestion & Normalization", "Database Viewer", "Predictive Maintenance"])
 
 
-# --- Ingestion & Normalization Tab (Unchanged) ---
+
 if tab == "Ingestion & Normalization":
     st.header("Data Ingestion & Normalization")
     st.info("Upload your CSV or Excel file. The system will automatically map any matching columns.")
@@ -64,17 +63,17 @@ if tab == "Ingestion & Normalization":
             except requests.exceptions.ConnectionError as e:
                  st.error(f"Could not connect to backend: {e}")
     st.divider()
-    if st.button("Trigger BCNF Normalization", type="primary"):
+    if st.button("Trigger Normalization", type="primary"):
         try:
             response = requests.post(f"{BACKEND_URL}/normalize/")
             if response.status_code == 200:
-                st.success(f"BCNF Normalization triggered successfully! {response.json().get('message')}")
+                st.success(f"Normalization triggered successfully! {response.json().get('message')}")
             else:
                 st.error(f"Error triggering normalization: {response.json().get('detail')}")
         except requests.exceptions.ConnectionError as e:
             st.error(f"Could not connect to backend: {e}")
 
-# --- Database Viewer Tab (Unchanged) ---
+
 elif tab == "Database Viewer":
     st.header("Global Database Viewer")
 
@@ -89,12 +88,12 @@ elif tab == "Database Viewer":
             
             table_info = st.session_state.table_info
             
-            # Filter out the new ServiceCenters table from this view
+            
             viewable_tables = {k: v for k, v in table_info.items() if k != 'ServiceCenters'}
 
             selected_table = st.selectbox(
                 "Select a table to view", 
-                viewable_tables.keys(), # Use filtered list
+                viewable_tables.keys(), 
                 on_change=clear_filters_and_page
             )
 
@@ -128,7 +127,7 @@ elif tab == "Database Viewer":
                 if active_filters:
                     st.info(f"Active Filters: `{active_filters}`")
 
-                col1, col2, col3 = st.columns([1.5, 1.5, 7]) # Adjusted col ratios
+                col1, col2, col3 = st.columns([1.5, 1.5, 7]) 
                 if col1.button("⬅️ Previous Page", use_container_width=True):
                     if page > 1:
                         st.session_state[f"{selected_table}_page"] = page - 1
@@ -165,7 +164,7 @@ elif tab == "Database Viewer":
         st.error(f"Could not connect to the backend: {e}. Please ensure the backend is running.")
 
 
-# --- Predictive Maintenance Tab (UPDATED) ---
+# pred main
 elif tab == "Predictive Maintenance":
     st.header("⚙️ Predictive Maintenance & Scheduling")
     st.info("Fill in vehicle details. Leave fields blank to use the dataset's average values for prediction.")
@@ -177,7 +176,7 @@ elif tab == "Predictive Maintenance":
 
     with st.form("prediction_form"):
         
-        # --- Form Layout (Unchanged) ---
+        #form layout
         st.subheader("Vehicle & Usage")
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -214,8 +213,8 @@ elif tab == "Predictive Maintenance":
         schedule_button = submit_col2.form_submit_button("2. Predict & Generate Schedule", type="primary", use_container_width=True)
 
         if predict_button or schedule_button:
-            st.session_state.prediction_result = None # Clear previous results
-            st.session_state.search_results = [] # Clear old search results
+            st.session_state.prediction_result = None 
+            st.session_state.search_results = [] 
             
             payload = {
                 "Vehicle_Model": Vehicle_Model if Vehicle_Model else None,
@@ -260,7 +259,6 @@ elif tab == "Predictive Maintenance":
             except requests.exceptions.ConnectionError as e:
                 st.error(f"Could not connect to backend: {e}")
 
-    # --- Display Results & Booking Form (outside the form) ---
     if st.session_state.prediction_result:
         result = st.session_state.prediction_result
         prediction = result.get("prediction")
@@ -272,7 +270,7 @@ elif tab == "Predictive Maintenance":
         if prediction == 1:
             st.error(f"**Maintenance Required** (Confidence: {probability:.2%})")
             
-            # Show schedule message if it exists
+            # show suggested date 
             if result.get("schedule_message"):
                 st.subheader("Service Schedule Suggestion")
                 message = result.get("schedule_message")
@@ -283,7 +281,7 @@ elif tab == "Predictive Maintenance":
                 else:
                     st.info(message)
             
-            # --- Service Booking Section ---
+            # service booking
             st.subheader("Book Your Service")
             st.write("Find a service center in your area.")
             
@@ -326,15 +324,15 @@ elif tab == "Predictive Maintenance":
                     with col2:
                         book_key = f"book_{center.get('name', 'unknown')}_{center.get('phone', 'unknown')}"
                         
-                        # --- THIS IS THE UPDATED LOGIC ---
+                       
                         if st.button("Book Now", key=book_key, use_container_width=True):
                             try:
-                                # Call the new /book_service/ endpoint
+                                #call
                                 booking_payload = {"service_center_name": center.get('name')}
                                 book_response = requests.post(f"{BACKEND_URL}/book_service/", json=booking_payload)
                                 
                                 if book_response.status_code == 200:
-                                    # Get the real booking ID from the response
+                                    # Get booking id
                                     booking_id = book_response.json().get('booking_id')
                                     st.toast(f"Booking Confirmed! Your ID is {booking_id} 🚗💨", icon="✅")
                                 else:
